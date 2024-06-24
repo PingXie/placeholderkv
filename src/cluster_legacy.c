@@ -68,7 +68,7 @@ int clusterAddSlot(clusterNode *n, int slot);
 int clusterDelSlot(int slot);
 int clusterDelNodeSlots(clusterNode *node);
 int clusterNodeSetSlotBit(clusterNode *n, int slot);
-void clusterSetPrimary(clusterNode *n, int closeSlots);
+void clusterSetMyPrimary(clusterNode *n, int closeSlots);
 void clusterHandleReplicaFailover(void);
 void clusterHandleReplicaMigration(int max_replicas);
 int bitmapTestBit(unsigned char *bitmap, int pos);
@@ -706,7 +706,7 @@ int clusterSaveConfig(int do_fsync) {
     content_size = sdslen(ci);
 
     /* Create a temp file with the new content. */
-    tmpfilename = sdscatfmt(sdsempty(), "%s.tmp-%i-%I", server.cluster_configfile, (int)getpid(), mstime());
+    tmpfilename = sdscatfmt(sdsempty(), "%s.tmp-%i-%I", server.debug_cluster_configfile, (int)getpid(), mstime());
     if ((fd = open(tmpfilename, O_WRONLY | O_CREAT, 0644)) == -1) {
         serverLog(LL_WARNING, "Could not open temp cluster config file: %s", strerror(errno));
         goto cleanup;
@@ -731,13 +731,13 @@ int clusterSaveConfig(int do_fsync) {
         }
     }
 
-    if (rename(tmpfilename, server.cluster_configfile) == -1) {
+    if (rename(tmpfilename, server.debug_cluster_configfile) == -1) {
         serverLog(LL_WARNING, "Could not rename tmp cluster config file: %s", strerror(errno));
         goto cleanup;
     }
 
     if (do_fsync) {
-        if (fsyncFileDir(server.cluster_configfile) == -1) {
+        if (fsyncFileDir(server.debug_cluster_configfile) == -1) {
             serverLog(LL_WARNING, "Could not sync cluster config file dir: %s", strerror(errno));
             goto cleanup;
         }
@@ -990,10 +990,10 @@ void clusterInit(void) {
     /* Lock the cluster config file to make sure every node uses
      * its own nodes.conf. */
     server.cluster_config_file_lock_fd = -1;
-    if (clusterLockConfig(server.cluster_configfile) == C_ERR) exit(1);
+    if (clusterLockConfig(server.debug_cluster_configfile) == C_ERR) exit(1);
 
     /* Load or create a new nodes configuration. */
-    if (clusterLoadConfig(server.cluster_configfile) == C_ERR) {
+    if (clusterLoadConfig(server.debug_cluster_configfile) == C_ERR) {
         /* No configuration found. We will just use the random name provided
          * by the createClusterNode() function. */
         myself = server.cluster->myself = createClusterNode(NULL, CLUSTER_NODE_MYSELF | CLUSTER_NODE_PRIMARY);
@@ -2250,8 +2250,20 @@ void clusterSetNodeAsPrimary(clusterNode *n) {
 
     if (n->replicaof) {
         clusterNodeRemoveReplica(n->replicaof, n);
+        debugServerAssert(areInSameShard(n, n->replicaof));
         if (n != myself) n->flags |= CLUSTER_NODE_MIGRATE_TO;
+        /* Handle failover scenarios by ensuring a maximum of two
+         * primaries per shard. Note that
+         * 1. The slot mapping update is always handled by the caller
+         * 2. `clusterUpdateSlotsConfigWith` assumes `myself`'s
+         *    primaryship is not changed by anyone else and it
+         *    handles `myself`'s primaryship update itself */
+        if (n->replicaof != myself) {
+            n->replicaof->flags &= ~CLUSTER_NODE_PRIMARY;
+            n->replicaof->flags |= CLUSTER_NODE_REPLICA;
+        }
     }
+
     n->flags &= ~CLUSTER_NODE_REPLICA;
     n->flags |= CLUSTER_NODE_PRIMARY;
     n->replicaof = NULL;
@@ -2273,7 +2285,7 @@ void clusterSetNodeAsPrimary(clusterNode *n) {
  * case we receive the info via an UPDATE packet. */
 void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoch, unsigned char *slots) {
     int j;
-    clusterNode *cur_primary = NULL, *new_primary = NULL;
+    clusterNode *my_cur_primary = NULL, *my_new_primary = NULL;
     /* The dirty slots list is a list of slots for which we lose the ownership
      * while having still keys inside. This usually happens after a failover
      * or after a manual cluster reconfiguration operated by the admin.
@@ -2290,10 +2302,10 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
     int sender_slots = 0;
     int migrated_our_slots = 0;
 
-    /* Here we set cur_primary to this node or the node this node
+    /* Here we set my_cur_primary to this node or the node this node
      * replicates to if it's a replica. In the for loop we are
-     * interested to check if slots are taken away from cur_primary. */
-    cur_primary = clusterNodeIsPrimary(myself) ? myself : myself->replicaof;
+     * interested to check if slots are taken away from my_cur_primary. */
+    my_cur_primary = clusterNodeIsPrimary(myself) ? myself : myself->replicaof;
 
     if (sender == myself) {
         serverLog(LL_NOTICE, "Discarding UPDATE message about myself.");
@@ -2330,8 +2342,8 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
                     dirty_slots_count++;
                 }
 
-                if (server.cluster->slots[j] == cur_primary) {
-                    new_primary = sender;
+                if (server.cluster->slots[j] == my_cur_primary) {
+                    my_new_primary = sender;
                     migrated_our_slots++;
                 }
 
@@ -2458,13 +2470,13 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
      * keys redirections. */
     if (server.cluster_module_flags & CLUSTER_MODULE_FLAG_NO_REDIRECTION) return;
 
-    /* Handle a special case where new_primary is not set but both sender
+    /* Handle a special case where my_new_primary is not set but both sender
      * and myself own no slots and in the same shard. Set the sender as
      * the new primary if my current config epoch is lower than the
      * sender's. */
-    if (!new_primary && myself->replicaof != sender && sender_slots == 0 && myself->numslots == 0 &&
+    if (!my_new_primary && myself->replicaof != sender && sender_slots == 0 && myself->numslots == 0 &&
         nodeEpoch(myself) < senderConfigEpoch && areInSameShard(sender, myself)) {
-        new_primary = sender;
+        my_new_primary = sender;
     }
 
     /* If the shard to which this node (myself) belongs loses all of
@@ -2486,7 +2498,7 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
      * shard and our primary just had its last slot migrated to the
      * sender. In this case we don't reconfigure ourselves as a replica
      * of the sender. */
-    if (new_primary && cur_primary->numslots == 0) {
+    if (my_new_primary && my_cur_primary->numslots == 0) {
         if (server.cluster_allow_replica_migration || areInSameShard(sender, myself)) {
             serverLog(LL_NOTICE,
                       "Configuration change detected. Reconfiguring myself "
@@ -2494,7 +2506,7 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
                       sender->name, sender->human_nodename, sender->shard_id);
             /* Don't clear the migrating/importing states if this is a replica that
              * just gets promoted to the new primary in the shard. */
-            clusterSetPrimary(sender, !areInSameShard(sender, myself));
+            clusterSetMyPrimary(sender, !areInSameShard(sender, myself));
             clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG | CLUSTER_TODO_UPDATE_STATE | CLUSTER_TODO_FSYNC_CONFIG);
         } else if ((sender_slots >= migrated_our_slots) && !areInSameShard(sender, myself)) {
             /* When all our slots are lost to the sender and the sender belongs to
@@ -2771,7 +2783,7 @@ int clusterIsValidPacket(clusterLink *link) {
         return 0;
     }
 
-    if (type == server.cluster_drop_packet_filter) {
+    if (type == server.debug_cluster_drop_packet_filter) {
         serverLog(LL_WARNING, "Dropping packet that matches debug drop filter");
         return 0;
     }
@@ -2851,7 +2863,7 @@ int clusterProcessPacket(clusterLink *link) {
     if (!clusterIsValidPacket(link)) {
         clusterMsg *hdr = (clusterMsg *)link->rcvbuf;
         uint16_t type = ntohs(hdr->type);
-        if (server.debug_cluster_close_link_on_packet_drop && type == server.cluster_drop_packet_filter) {
+        if (server.debug_cluster_close_link_on_packet_drop && type == server.debug_cluster_drop_packet_filter) {
             freeClusterLink(link);
             serverLog(LL_WARNING, "Closing link for matching packet type %hu", type);
             return 0;
@@ -3051,16 +3063,26 @@ int clusterProcessPacket(clusterLink *link) {
                       !memcmp(hdr->replicaof, CLUSTER_NODE_NULL_NAME, sizeof(hdr->replicaof)) ? "primary" : "replica",
                       sender->shard_id);
             if (!memcmp(hdr->replicaof, CLUSTER_NODE_NULL_NAME, sizeof(hdr->replicaof))) {
-                /* Node is a primary. */
-                clusterSetNodeAsPrimary(sender);
+                /* Sender is now a primary but check if this is a stale message. */
+                if (sender->replicaof != NULL && sender->replicaof->configEpoch > senderConfigEpoch) {
+                    /* This message is from the past */
+                    serverLog(LL_NOTICE,
+                              "Ignore stale message from %.40s (%s) in shard %.40s;"
+                              " gossip config epoch: %llu, current config epoch: %llu",
+                              sender->name, sender->human_nodename, sender->shard_id,
+                              (unsigned long long)senderConfigEpoch,
+                              (unsigned long long)sender->replicaof->configEpoch);
+                } else {
+                    clusterSetNodeAsPrimary(sender);
+                }
             } else {
-                /* Node is a replica. */
+                /* Sender is a replica. */
                 clusterNode *primary = clusterLookupNode(hdr->replicaof, CLUSTER_NAMELEN);
 
                 if (clusterNodeIsPrimary(sender)) {
                     /* Primary turned into a replica! Reconfigure the node. */
                     if (primary && areInSameShard(primary, sender)) {
-                        /* `sender` was a primary and was in the same shard as its new primary */
+                        /* Sender was a primary and was in the same shard as its new primary */
                         if (sender->configEpoch > senderConfigEpoch) {
                             serverLog(LL_NOTICE,
                                       "Ignore stale message from %.40s (%s) in shard %.40s;"
@@ -3155,7 +3177,7 @@ int clusterProcessPacket(clusterLink *link) {
              * over the slot, there is nothing else to trigger replica migration. */
             serverLog(LL_NOTICE, "I'm a sub-replica! Reconfiguring myself as a replica of %.40s from %.40s",
                       myself->replicaof->replicaof->name, myself->replicaof->name);
-            clusterSetPrimary(myself->replicaof->replicaof, 1);
+            clusterSetMyPrimary(myself->replicaof->replicaof, 1);
             clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG | CLUSTER_TODO_UPDATE_STATE | CLUSTER_TODO_FSYNC_CONFIG);
         }
 
@@ -3625,7 +3647,7 @@ void clusterSetGossipEntry(clusterMsg *hdr, int i, clusterNode *n) {
 
 /* Send a PING or PONG packet to the specified node, making sure to add enough
  * gossip information. */
-void clusterSendPing(clusterLink *link, int type) {
+void cluserSendPing(clusterLink *link, int type) {
     static unsigned long long cluster_pings_sent = 0;
     cluster_pings_sent++;
     int gossipcount = 0; /* Number of gossip sections added so far. */
@@ -4472,7 +4494,7 @@ void clusterHandleReplicaMigration(int max_replicas) {
         !(server.cluster_module_flags & CLUSTER_MODULE_FLAG_NO_FAILOVER)) {
         serverLog(LL_NOTICE, "Migrating to orphaned primary %.40s (%s) in shard %.40s", target->name,
                   target->human_nodename, target->shard_id);
-        clusterSetPrimary(target, 1);
+        clusterSetMyPrimary(target, 1);
     }
 }
 
@@ -4663,7 +4685,7 @@ void clusterCron(void) {
 
     /* Ping some random node 1 time every 10 iterations, so that we usually ping
      * one random node every second. */
-    if (!(iteration % 10)) {
+    if (!(iteration % 10) && server.debug_cluster_ping_interval == 0) {
         int j;
 
         /* Check a few random nodes and ping the one with the oldest
@@ -4738,7 +4760,7 @@ void clusterCron(void) {
          * a new ping now, to ensure all the nodes are pinged without
          * a too big delay. */
         mstime_t ping_interval =
-            server.cluster_ping_interval ? server.cluster_ping_interval : server.cluster_node_timeout / 2;
+            server.debug_cluster_ping_interval ? server.debug_cluster_ping_interval : server.cluster_node_timeout / 2;
         if (node->link && node->ping_sent == 0 && (now - node->pong_received) > ping_interval) {
             clusterSendPing(node->link, CLUSTERMSG_TYPE_PING);
             continue;
@@ -5176,7 +5198,7 @@ static inline void removeAllNotOwnedShardChannelSubscriptions(void) {
 
 /* Set the specified node 'n' as primary for this node.
  * If this node is currently a primary, it is turned into a replica. */
-void clusterSetPrimary(clusterNode *n, int closeSlots) {
+void clusterSetMyPrimary(clusterNode *n, int closeSlots) {
     serverAssert(n != myself);
     serverAssert(myself->numslots == 0);
 
@@ -6093,7 +6115,7 @@ void clusterCommandSetSlot(client *c) {
                       "Lost my last slot during slot migration. Reconfiguring myself "
                       "as a replica of %.40s (%s) in shard %.40s",
                       n->name, n->human_nodename, n->shard_id);
-            clusterSetPrimary(n, 1);
+            clusterSetMyPrimary(n, 1);
             clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG | CLUSTER_TODO_UPDATE_STATE | CLUSTER_TODO_FSYNC_CONFIG);
         }
 
@@ -6299,7 +6321,7 @@ int clusterCommandSpecial(client *c) {
         }
 
         /* Set the primary. */
-        clusterSetPrimary(n, 1);
+        clusterSetMyPrimary(n, 1);
         clusterBroadcastPong(CLUSTER_BROADCAST_ALL);
         clusterDoBeforeSleep(CLUSTER_TODO_UPDATE_STATE | CLUSTER_TODO_SAVE_CONFIG);
         addReply(c, shared.ok);

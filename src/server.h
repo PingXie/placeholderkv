@@ -131,7 +131,7 @@ struct hdr_histogram;
 #define CONFIG_BGSAVE_RETRY_DELAY 5              /* Wait a few secs before trying again. */
 #define CONFIG_DEFAULT_PID_FILE "/var/run/valkey.pid"
 #define CONFIG_DEFAULT_BINDADDR_COUNT 2
-#define CONFIG_DEFAULT_BINDADDR {"*", "-::*"}
+#define CONFIG_DEFAULT_BINDADDR { "*", "-::*" }
 #define NET_HOST_STR_LEN 256                          /* Longest valid hostname */
 #define NET_IP_STR_LEN 46                             /* INET6_ADDRSTRLEN is 46, but we need to be sure */
 #define NET_ADDR_STR_LEN (NET_IP_STR_LEN + 32)        /* Must be enough for ip:port */
@@ -1497,7 +1497,8 @@ typedef struct rdbSaveInfo {
     long long repl_offset;                /* Replication offset. */
 } rdbSaveInfo;
 
-#define RDB_SAVE_INFO_INIT {-1, 0, "0000000000000000000000000000000000000000", -1}
+#define RDB_SAVE_INFO_INIT                                                                                             \
+    { -1, 0, "0000000000000000000000000000000000000000", -1 }
 
 struct malloc_stats {
     size_t zmalloc_used;
@@ -2039,13 +2040,14 @@ struct valkeyServer {
     unsigned int pubsub_clients;   /* # of clients in Pub/Sub mode */
     unsigned int watching_clients; /* # of clients are watching keys */
     /* Cluster */
-    int cluster_enabled;            /* Is cluster enabled? */
-    int cluster_port;               /* Set the cluster port for a node. */
-    mstime_t cluster_node_timeout;  /* Cluster node timeout. */
-    mstime_t cluster_ping_interval; /* A debug configuration for setting how often cluster nodes send ping messages. */
-    char *cluster_configfile;       /* Cluster auto-generated config file name. */
-    struct clusterState *cluster;   /* State of the cluster */
-    int cluster_migration_barrier;  /* Cluster replicas migration barrier. */
+    int cluster_enabled;           /* Is cluster enabled? */
+    int cluster_port;              /* Set the cluster port for a node. */
+    mstime_t cluster_node_timeout; /* Cluster node timeout. */
+    mstime_t
+        debug_cluster_ping_interval; /* A debug configuration for setting how often cluster nodes send ping messages. */
+    char *cluster_configfile;        /* Cluster auto-generated config file name. */
+    struct clusterState *cluster;    /* State of the cluster */
+    int cluster_migration_barrier;   /* Cluster replicas migration barrier. */
     int cluster_allow_replica_migration; /* Automatic replica migrations to orphaned primaries and from empty primaries */
     int cluster_replica_validity_factor;                   /* Replica max data age for failover. */
     int cluster_require_full_coverage;                     /* If true, put the cluster down if
@@ -2067,7 +2069,7 @@ struct valkeyServer {
                                                             is down? */
     int cluster_config_file_lock_fd;                       /* cluster config fd, will be flocked. */
     unsigned long long cluster_link_msg_queue_limit_bytes; /* Memory usage limit on individual link msg queue */
-    int cluster_drop_packet_filter;                        /* Debug config that allows tactically
+    int debug_cluster_drop_packet_filter;                  /* Debug config that allows tactically
                                                             * dropping packets of a specific type */
     /* Debug config that goes along with cluster_drop_packet_filter. When set, the link is closed on packet drop. */
     uint32_t debug_cluster_close_link_on_packet_drop : 1;

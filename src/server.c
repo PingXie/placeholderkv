@@ -2557,7 +2557,7 @@ void initServer(void) {
     server.blocked_last_cron = 0;
     server.blocking_op_nesting = 0;
     server.thp_enabled = 0;
-    server.cluster_drop_packet_filter = -1;
+    server.debug_cluster_drop_packet_filter = -1;
     server.reply_buffer_peak_reset_time = REPLY_BUFFER_DEFAULT_PEAK_RESET_TIME;
     server.reply_buffer_resizing_enabled = 1;
     server.client_mem_usage_buckets = NULL;
